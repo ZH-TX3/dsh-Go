@@ -62,9 +62,8 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
     @Volatile private var lastWindows = 0
     @Volatile private var lastPkg: String? = null
 
-    /** Loopback listener for `adb forward`: no `am broadcast` per read, so a read is the read alone. */
-    private var server: ServerSocket? = null
-    private var acceptThread: Thread? = null
+    /** Loopback listeners for `adb forward`: no `am broadcast` per read, so a read is the read alone. */
+    private var servers: List<ServerSocket> = emptyList()
     @Volatile private var token: String? = null
 
     private val receiver = object : BroadcastReceiver() {
@@ -227,38 +226,42 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
      *
      * The token arrives with the broadcast, which only a holder of android.permission.DUMP can
      * send; every app on the phone can open the loopback port, and none of them can answer-guess
-     * it. The socket is bound to 127.0.0.1 and never leaves the device.
+     * it. Both loopback addresses are bound (see [LOOPBACKS]) and nothing else.
      */
     private fun listen(a: Args): String {
         val t = a.s("token")
         if (t == null || t.length < 8) return "ERR token must be at least 8 characters"
         val port = a.i("port") ?: PORT
         stopListening()
-        val s = ServerSocket()
-        return try {
-            s.reuseAddress = true
-            // 127.0.0.1 spelled out, not getLoopbackAddress(): the latter follows
-            // java.net.preferIPv6Addresses, and `adb forward` connects over IPv4.
-            s.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port))
-            server = s
-            token = t
-            acceptThread = Thread({ acceptLoop(s) }, "dsh-a11y-socket").apply {
+        val sockets = ArrayList<ServerSocket>(2)
+        val bound = ArrayList<String>(2)
+        for (host in LOOPBACKS) {
+            try {
+                val s = ServerSocket()
+                s.reuseAddress = true
+                s.bind(InetSocketAddress(InetAddress.getByName(host), port))
+                sockets += s
+                bound += host
+            } catch (e: Throwable) {
+                Log.i(TAG, "listen on $host:$port: ${e.javaClass.simpleName}")
+            }
+        }
+        if (sockets.isEmpty()) return "ERR nothing bound on port $port (127.0.0.1, ::1)"
+        servers = sockets
+        token = t
+        for (s in sockets) {
+            Thread({ acceptLoop(s) }, "dsh-a11y-socket").apply {
                 isDaemon = true
                 start()
             }
-            "listening on 127.0.0.1:$port"
-        } catch (e: Throwable) {
-            runCatching { s.close() }
-            "ERR ${e.javaClass.simpleName}: ${e.message}"
         }
+        return "listening on ${bound.joinToString(", ")}:$port"
     }
 
     private fun stopListening() {
         token = null
-        runCatching { server?.close() }
-        server = null
-        acceptThread?.interrupt()
-        acceptThread = null
+        servers.forEach { runCatching { it.close() } }
+        servers = emptyList()
     }
 
     private fun acceptLoop(s: ServerSocket) {
@@ -421,6 +424,10 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
 
         /** Loopback port `cmd listen` binds (`adb forward tcp:PORT tcp:PORT`). */
         const val PORT = 47913
+
+        /** Both families: `adb forward` arrives over IPv4, a proot client may well try ::1. Never
+         *  the wildcard — that would put a screen reader on the LAN. */
+        private val LOOPBACKS = listOf("127.0.0.1", "::1")
 
         /** A reused read answers within this window; after it, the tree is read again. */
         private const val REUSE_MS = 2_000L

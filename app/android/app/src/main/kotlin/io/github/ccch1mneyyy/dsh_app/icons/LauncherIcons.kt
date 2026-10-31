@@ -35,24 +35,36 @@ internal object LauncherIcons {
     /** The mipmap a variant's launcher entry uses (its alias's android:icon; LaunchThemesTest checks). */
     fun mipmapOf(variant: String): String = if (variant == MIST) "ic_launcher" else "ic_launcher_$variant"
 
-    private const val PKG = "io.github.ccch1mneyyy.dsh_app"
+    /**
+     * The package the aliases live in. The applicationId carries a suffix in this fork's builds
+     * (app/build.gradle.kts: every flavor installs next to an official DSH Go), and an alias's
+     * class name has to follow it or ComponentName points at the other install. The plugin binds
+     * the running package before the first read; the value below is the repo's own.
+     */
+    @Volatile
+    private var pkg = "io.github.ccch1mneyyy.dsh_app"
 
-    class Alias(val variant: String, val className: String, val enabledByManifest: Boolean) {
-        override fun toString() = className.substringAfterLast('.')
+    fun bind(packageName: String) { pkg = packageName }
+
+    class Alias(val variant: String, val simpleName: String, val enabledByManifest: Boolean) {
+        /** Fully qualified, in the package of this install. */
+        val className get() = "$pkg.$simpleName"
+
+        override fun toString() = simpleName
     }
 
     /** The entry every install starts with. */
-    val ORIGINAL = Alias(MIST, "$PKG.LauncherMist", enabledByManifest = true)
+    val ORIGINAL = Alias(MIST, "LauncherMist", enabledByManifest = true)
 
     /** 雾蓝 again, once [ORIGINAL] has been switched off. */
-    val MIST_ALT = Alias(MIST, "$PKG.LauncherMistAlt", enabledByManifest = false)
+    val MIST_ALT = Alias(MIST, "LauncherMistAlt", enabledByManifest = false)
 
     val aliases = listOf(
         ORIGINAL,
         MIST_ALT,
-        Alias(NIGHT, "$PKG.LauncherNight", enabledByManifest = false),
-        Alias(FROST, "$PKG.LauncherFrost", enabledByManifest = false),
-        Alias(INK, "$PKG.LauncherInk", enabledByManifest = false),
+        Alias(NIGHT, "LauncherNight", enabledByManifest = false),
+        Alias(FROST, "LauncherFrost", enabledByManifest = false),
+        Alias(INK, "LauncherInk", enabledByManifest = false),
     )
 
     /** Whether [alias] is a launcher entry when its stored setting is [state]. */

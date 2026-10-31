@@ -48,12 +48,17 @@ android {
 
     flavorDimensions += "abi"
     productFlavors {
+        // .a11y on both: this fork's APKs install next to an official DSH Go instead of over it,
+        // so the official app's data (sessions, tokens, the Linux rootfs) is never touched.
+        // Mismatched signing keys would otherwise force an uninstall first.
         create("arm64") {
             dimension = "abi"
+            applicationIdSuffix = ".a11y"
             ndk { abiFilters += "arm64-v8a" }
         }
         create("x64") {
             dimension = "abi"
+            applicationIdSuffix = ".a11y"
             ndk { abiFilters += "x86_64" }
         }
     }

@@ -11,18 +11,23 @@
 #
 # Needs the app installed and its accessibility service switched on (设置 → 无障碍). The
 # broadcast is protected by android.permission.DUMP, so only adb shell can send it. The JSON
-# comes from /sdcard/Android/data/io.github.ccch1mneyyy.dsh_app/files/a11y-probe/tree.json;
-# the schema is documented in app/…/phone/a11y/TreeJson.kt.
+# comes from /sdcard/Android/data/<pkg>/files/a11y-probe/tree.json; the schema is documented
+# in app/…/phone/a11y/TreeJson.kt.
+#
+# The fork's builds install as <pkg>.a11y (app/build.gradle.kts), next to an official DSH Go.
+# A11Y_PKG=io.github.ccch1mneyyy.dsh_app overrides this for an unsuffixed build.
 set -euo pipefail
 
-pkg=io.github.ccch1mneyyy.dsh_app
+pkg=${A11Y_PKG:-io.github.ccch1mneyyy.dsh_app.a11y}
+# A constant in A11yProbe, not derived from the package: a suffixed install listens on the same one.
+action=io.github.ccch1mneyyy.dsh_app.A11Y_PROBE
 name=tree
 budget=400
-seq=$RANDOM
+tag=$RANDOM
 out=''
 serial=()
 
-usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { echo "a11y-dump: $*" >&2; exit 1; }
 
 probe=app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/phone/a11y/A11yProbe.kt
@@ -32,10 +37,10 @@ while (($#)); do
     -o | --out) out=${2:?--out needs a file}; shift 2 ;;
     -s | --serial) serial=(-s "${2:?--serial needs a device}"); shift 2 ;;
     --budget) budget=${2:?--budget needs milliseconds}; shift 2 ;;
-    --seq) seq=${2:?--seq needs a number}; shift 2 ;;
+    --seq) tag=${2:?--seq needs a number}; shift 2 ;;
     -h | --help) usage; exit 0 ;;
     --commands)
-      echo "am broadcast -a $pkg.A11Y_PROBE --es cmd <cmd> --ei seq N"
+      echo "am broadcast -a $action --es cmd <cmd> --ei seq N"
       echo "cmds: dump ping screen target tap type scroll key tapxy open collect fg windows"
       echo "      status confirm handoff injecttest guard begin finish overlay palette"
       echo "full list: $probe"
@@ -45,19 +50,19 @@ while (($#)); do
 done
 
 command -v adb >/dev/null 2>&1 || die "adb is not on PATH"
-[[ $seq =~ ^[0-9]+$ ]] || die "seq must be a number: $seq"
+[[ $tag =~ ^[0-9]+$ ]] || die "seq must be a number: $tag"
 [[ $budget =~ ^[0-9]+$ ]] || die "budget must be milliseconds: $budget"
 
 remote=/sdcard/Android/data/$pkg/files/a11y-probe/$name.json
 
 adb "${serial[@]}" shell am broadcast \
-  -a "$pkg.A11Y_PROBE" \
-  --es cmd dump --es name "$name" --ei seq "$seq" --ei budget "$budget" >/dev/null
+  -a "$action" \
+  --es cmd dump --es name "$name" --ei seq "$tag" --ei budget "$budget" >/dev/null
 
 # `am broadcast` returns when the broadcast is delivered, not when the probe has written; the
 # seq in the file is how we know this read, not the last one.
 for _ in $(seq 1 60); do
-  if adb "${serial[@]}" shell "grep -q '\"seq\":$seq' $remote" 2>/dev/null; then
+  if adb "${serial[@]}" shell "grep -q '\"seq\":$tag' $remote" 2>/dev/null; then
     if [[ -n $out ]]; then
       adb "${serial[@]}" exec-out cat "$remote" >"$out" && echo "a11y-dump: wrote $out" >&2
       exit 0

@@ -93,13 +93,30 @@ jobs:
           aapt2=$(ls -1d "$ANDROID_HOME"/build-tools/*/aapt2 | sort -V | tail -1)
           badge=$("$aapt2" dump badging "$apk" | sed -n '/^package:/p')
           echo "$badge"
+          # Coexistence: the suffix is why this installs beside an official DSH Go instead of over it.
+          case "$badge" in
+            *"name='io.github.ccch1mneyyy.dsh_app.a11y'"*) ;;
+            *) echo "::error::unexpected package: $badge"; exit 1 ;;
+          esac
+          # ...and the components must still resolve to the namespace's classes, not
+          # <applicationId>.MainActivity: the manifest names them relative (".MainActivity").
+          launch=$("$aapt2" dump badging "$apk" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
+          echo "launchable=$launch"
+          case "$launch" in
+            io.github.ccch1mneyyy.dsh_app.*) ;;
+            *) echo "::error::launchable activity '$launch' is outside the namespace"; exit 1 ;;
+          esac
           echo "apk=$apk ($(du -h "$apk" | cut -f1))"
           echo "sha256=$(sha256sum "$apk" | cut -d' ' -f1)" | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: unit tests (a11y)
+      - name: unit tests (a11y, launcher icons)
         if: matrix.flavor == 'x64' && matrix.mode == 'debug'
         working-directory: app/android
-        run: ./gradlew :app:testX64DebugUnitTest --tests 'io.github.ccch1mneyyy.dsh_app.phone.a11y.*'
+        run: >
+          ./gradlew :app:testX64DebugUnitTest
+          --tests 'io.github.ccch1mneyyy.dsh_app.phone.a11y.*'
+          --tests 'io.github.ccch1mneyyy.dsh_app.icons.*'
+          --tests 'io.github.ccch1mneyyy.dsh_app.launch.LaunchThemesTest'
 
       - uses: actions/upload-artifact@v4
         with:

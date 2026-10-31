@@ -170,6 +170,7 @@ class LauncherIconPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     private fun originalInUse(context: Context, background: Boolean): Boolean {
+        LauncherIcons.bind(context.packageName) // [LauncherIcons.Task.openedThroughOriginal] compares class names
         val tasks = tasks(context) ?: return true
         val power = context.getSystemService(PowerManager::class.java)
         val keyguard = context.getSystemService(KeyguardManager::class.java)
@@ -202,6 +203,9 @@ class LauncherIconPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         private fun chosen(context: Context): String? = prefs(context).getString(KEY_CHOSEN, null)
 
         private fun stateReader(context: Context): (String) -> Int {
+            // The aliases' class names carry the running package (it can be suffixed; see
+            // LauncherIcons.bind), so every read of a component state has to come after this.
+            LauncherIcons.bind(context.packageName)
             val pm = context.packageManager
             return { cls -> pm.getComponentEnabledSetting(ComponentName(context.packageName, cls)) }
         }

@@ -1,6 +1,6 @@
 // Portions derived from Phase (https://github.com/CikeSeven/phase), used with the author's permission. See THIRD_PARTY_NOTICES.md.
 // Local changes: registers into PhoneRegistry; stops the task on screen off, interrupt and
-// unbind through ControlListener; debug-only probe.
+// unbind through ControlListener; the probe is registered in every build type.
 
 package io.github.ccch1mneyyy.dsh_app.phone.a11y
 
@@ -10,7 +10,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
 import android.hardware.display.DisplayManager
 import android.os.Build
@@ -70,7 +69,10 @@ class PhoneA11yService : AccessibilityService() {
             if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, filter, Context.RECEIVER_NOT_EXPORTED) else registerReceiver(screenOff, filter)
             receiverRegistered = true
         } catch (e: Exception) { Log.w(TAG, "screen-off receiver", e) }
-        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) probe = A11yProbe(this, d, o).also { it.register() }
+        // Every build type: the probe is how a shell reads the tree (cmd dump) and how the
+        // service is checked without the bridge. The DUMP permission on the receiver keeps it
+        // to adb shell, exactly as before.
+        probe = A11yProbe(this, d, o).also { it.register() }
         Log.i(TAG, "accessibility service connected")
         PhoneRegistry.controlListener?.onAccessibilityChanged(true)
     }

@@ -2,15 +2,21 @@ package io.github.ccch1mneyyy.dsh_app.phone.a11y
 
 import io.github.ccch1mneyyy.dsh_app.i18n.AppStrings
 import io.github.ccch1mneyyy.dsh_app.R
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.graphics.Point
+import android.hardware.display.DisplayManager
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import io.github.ccch1mneyyy.dsh_app.phone.AppVisibility
 import io.github.ccch1mneyyy.dsh_app.phone.ConfirmRequest
 import io.github.ccch1mneyyy.dsh_app.phone.PhoneAction
@@ -19,14 +25,18 @@ import java.io.File
 import java.util.concurrent.Executors
 
 /**
- * Debug builds only (FLAG_DEBUGGABLE): drives the MAIN driver and the overlay from
- * `adb shell am broadcast` so the service can be checked on an emulator without the
- * bridge. The broadcast must come from a holder of android.permission.DUMP (adb shell);
- * apps, including code in DSH's own Linux environment, can't send it. Results go to
- * `files/a11y-probe/last.txt` (+ `last.jpg`), read with `run-as`.
+ * Drives the MAIN driver and the overlay from `adb shell am broadcast`, in every build type
+ * (the debug gate is gone on purpose: this repo's CI ships these APKs, see
+ * .github/workflows/build-apk.yml). The broadcast must come from a holder of
+ * android.permission.DUMP (adb shell); apps, including code in DSH's own Linux environment,
+ * can't send it. Results go to `files/a11y-probe/last.txt` (+ `last.jpg`), read with `run-as`;
+ * `dump` writes its JSON next to it and, more usefully, to a path adb shell can read:
+ * `/sdcard/Android/data/<pkg>/files/a11y-probe/`, plus `sdcard/dsh-a11y/` once
+ * WRITE_EXTERNAL_STORAGE is granted with `pm grant <pkg> android.permission.WRITE_EXTERNAL_STORAGE`.
  *
  *   am broadcast -a io.github.ccch1mneyyy.dsh_app.A11Y_PROBE --es cmd screen [--ez image true] [--ez detail true] --ei seq 1
- *   cmd: screen | target sid id | tap sid id [long] | type sid id text [submit] | scroll sid [id] dir |
+ *   cmd: dump [name] [budget ms] [--ez log true] (the tree as JSON: tree.json, <100 ms typical) |
+ *        ping | screen | target sid id | tap sid id [long] | type sid id text [submit] | scroll sid [id] dir |
  *        key back|home|recents|notifications | tapxy sid x y | open pkg | collect sid id [pages] [until] |
  *        fg | windows | status [text] | confirm sentence [app] [first] | handoff reason [ms] | injecttest [relax] | guard |
  *        begin (a task starts, as on a tool call) | finish [session] [host] [reopen] (what Dart's finishTask does) |
@@ -56,7 +66,7 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
         val filter = IntentFilter(ACTION)
         if (Build.VERSION.SDK_INT >= 33) service.registerReceiver(receiver, filter, "android.permission.DUMP", null, Context.RECEIVER_EXPORTED)
         else service.registerReceiver(receiver, filter, "android.permission.DUMP", null)
-        Log.i(TAG, "debug probe listening for $ACTION")
+        Log.i(TAG, "probe listening for $ACTION")
     }
 
     fun unregister() {
@@ -105,6 +115,8 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
                     },
                 ).toString()
                 "windows" -> windows()
+                "dump", "tree" -> dump(seq, a)
+                "ping" -> "pong connected=${PhoneA11yService.instance === service} enabled=${PhoneA11yService.isEnabled(service)}"
                 else -> "unknown cmd $cmd"
             }
         } catch (e: Throwable) {
@@ -121,6 +133,76 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
 
     private fun result(r: io.github.ccch1mneyyy.dsh_app.phone.ActionResult) =
         "ok=${r.ok} msg=${r.message}\n----\n${r.screen?.let { "id=${it.id}\n${it.text}" }}"
+
+    /**
+     * The tree as JSON: one [TreeCapture.capture] — the same read the driver does, so an `i` here
+     * is a usable `target`/`tap` id — serialized by [TreeJson] and written where adb shell can
+     * reach it. No image, no ScreenFormat, no driver: that is what keeps this at tens of
+     * milliseconds instead of the bridge's seconds.
+     */
+    private fun dump(seq: Int, a: Args): String {
+        val start = SystemClock.uptimeMillis()
+        val budget = (a.i("budget") ?: 400).toLong()
+        val cap = TreeCapture.capture(service, screenBox(), service.packageName, budget)
+        val nodes = TreeJson.count(cap)
+        val json = try {
+            TreeJson.stringify(cap, seq, SystemClock.uptimeMillis() - start)
+        } finally {
+            cap.recycle()
+        }
+        val bytes = json.toByteArray(Charsets.UTF_8)
+        val name = (a.s("name") ?: "tree").replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
+        val written = sinks().mapNotNull { d -> File(d, "$name.json").takeIf { writeAtomic(it, bytes) } }
+        if (a.b("log")) json.chunked(3_000).forEach { Log.i(TAG, it) }
+        return buildString {
+            append("bytes=${bytes.size} nodes=$nodes windows=${cap.windows.size} truncated=${cap.truncated}")
+            append(" pkg=${cap.packageName ?: "none"}")
+            append("\nfiles:\n")
+            if (written.isEmpty()) append("- (none written)\n") else written.forEach { append("- ").append(it.absolutePath).append('\n') }
+            append("----\n")
+            append(json.take(240))
+        }
+    }
+
+    /**
+     * Where a dump goes: the app's own files (run-as, debug builds), the app-specific external
+     * dir that adb shell can read on stock Android, and — once `pm grant` handed over the storage
+     * permission — a plain `sdcard/dsh-a11y/`.
+     */
+    private fun sinks(): List<File> {
+        val out = ArrayList<File>(3)
+        out += dir
+        service.getExternalFilesDir(null)?.let { out += File(it, "a11y-probe") }
+        if (service.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
+            out += File(Environment.getExternalStorageDirectory(), "dsh-a11y")
+        }
+        return out
+    }
+
+    /** Write-then-rename, so a shell polling for the file never reads half of one. */
+    private fun writeAtomic(file: File, bytes: ByteArray): Boolean = try {
+        file.parentFile?.mkdirs()
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        tmp.writeBytes(bytes)
+        if (!tmp.renameTo(file)) {
+            file.writeBytes(bytes)
+            tmp.delete()
+        }
+        true
+    } catch (e: Throwable) {
+        Log.w(TAG, "dump write ${file.absolutePath}", e)
+        false
+    }
+
+    private val displays by lazy { service.getSystemService(DisplayManager::class.java) }
+
+    /** The display's real size, read the way MainScreenDriver does (bounds are screen pixels). */
+    @Suppress("DEPRECATION")
+    private fun screenBox(): Box {
+        val p = Point()
+        displays?.getDisplay(Display.DEFAULT_DISPLAY)?.getRealSize(p)
+        return Box(0, 0, p.x.coerceAtLeast(1), p.y.coerceAtLeast(1))
+    }
 
     /**
      * Shows a confirm card, then injects a tap on 允许一次 through this service's own

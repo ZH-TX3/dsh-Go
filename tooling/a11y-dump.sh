@@ -41,6 +41,9 @@ die() { echo "a11y-dump: $*" >&2; exit 1; }
 
 probe=app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/phone/a11y/A11yProbe.kt
 
+# bash 3.2 (the macOS one) reports an empty array as unset under `set -u`.
+adbx() { adb ${serial[@]+"${serial[@]}"} "$@"; }
+
 while (($#)); do
   case "$1" in
     -o | --out) out=${2:?--out needs a file}; shift 2 ;;
@@ -71,11 +74,12 @@ command -v adb >/dev/null 2>&1 || die "adb is not on PATH"
 reuse_flag=''
 if ((reusable)); then reuse_flag=reuse; fi
 
-# The socket's token lives here, mode 600, one per device: a later read does not re-broadcast.
+# The socket's token lives here, mode 600: a later read does not re-broadcast. Named per device
+# (adb's own default is "default") so a second device cannot answer with the first one's token.
 token_file() {
-  local s
-  s=$(adb "${serial[@]}" get-serialno 2>/dev/null | tr -d '\r\n') || s=''
-  printf '%s/dsh-a11y-%s.token' "${TMPDIR:-/tmp}" "${s:-device}"
+  local s=${ANDROID_SERIAL:-default}
+  if ((${#serial[@]})); then s=${serial[1]}; fi
+  printf '%s/dsh-a11y-%s.token' "${TMPDIR:-/tmp}" "$s"
 }
 
 new_token() { LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 24 || true; }
@@ -99,7 +103,7 @@ send() {
 
 # Broadcasts the token, then waits for the port to answer (the bind happens after delivery).
 listen_with() {
-  adb "${serial[@]}" shell am broadcast -a "$action" --es cmd listen \
+  adbx shell am broadcast -a "$action" --es cmd listen \
     --es token "$1" --ei port "$port" >/dev/null
   local i
   for i in $(seq 1 40); do
@@ -110,14 +114,14 @@ listen_with() {
 }
 
 if ((stop)); then
-  adb "${serial[@]}" shell am broadcast -a "$action" --es cmd unlisten >/dev/null
+  adbx shell am broadcast -a "$action" --es cmd unlisten >/dev/null
   rm -f "$(token_file)"
   echo "a11y-dump: listener stopped" >&2
   exit 0
 fi
 
 if ((socket)); then
-  adb "${serial[@]}" forward "tcp:$port" "tcp:$port" >/dev/null
+  adbx forward "tcp:$port" "tcp:$port" >/dev/null
   tf=$(token_file)
   token=''
   [[ -f $tf ]] && token=$(cat "$tf")
@@ -150,24 +154,24 @@ fi
 
 remote=/sdcard/Android/data/$pkg/files/a11y-probe/$name.json
 
-adb "${serial[@]}" shell am broadcast \
+adbx shell am broadcast \
   -a "$action" \
   --es cmd dump --es name "$name" --ei seq "$tag" --ei budget "$budget" >/dev/null
 
 # `am broadcast` returns when the broadcast is delivered, not when the probe has written; the
 # seq in the file is how we know this read, not the last one.
 for _ in $(seq 1 60); do
-  if adb "${serial[@]}" shell "grep -q '\"seq\":$tag' $remote" 2>/dev/null; then
+  if adbx shell "grep -q '\"seq\":$tag' $remote" 2>/dev/null; then
     if [[ -n $out ]]; then
-      adb "${serial[@]}" exec-out cat "$remote" >"$out" && echo "a11y-dump: wrote $out" >&2
+      adbx exec-out cat "$remote" >"$out" && echo "a11y-dump: wrote $out" >&2
       exit 0
     fi
-    adb "${serial[@]}" exec-out cat "$remote"
+    adbx exec-out cat "$remote"
     exit 0
   fi
   sleep 0.1
 done
 
 echo "a11y-dump: nothing after 6 s. Is the service on? (the pkg must be installed and 无障碍 enabled)" >&2
-adb "${serial[@]}" logcat -d -s DshA11yProbe DshA11y | tail -20 >&2 || true
+adbx logcat -d -s DshA11yProbe DshA11y | tail -20 >&2 || true
 exit 1

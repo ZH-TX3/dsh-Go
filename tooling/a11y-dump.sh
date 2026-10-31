@@ -11,6 +11,7 @@
 #   tooling/a11y-dump.sh --budget 800       more time for a big tree (default 400 ms)
 #   tooling/a11y-dump.sh -s emulator-5554   pick the device
 #   tooling/a11y-dump.sh --commands         the probe's other commands
+#   tooling/a11y-dump.sh --token <t>        the token the listener has (or A11Y_TOKEN=…)
 #   tooling/a11y-dump.sh --stop             close the socket listener
 #
 # Needs the app installed and its accessibility service switched on (设置 → 无障碍). Both
@@ -35,8 +36,9 @@ serial=()
 socket=0
 reusable=0
 stop=0
+token_arg=
 
-usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { echo "a11y-dump: $*" >&2; exit 1; }
 
 probe=app/android/app/src/main/kotlin/io/github/ccch1mneyyy/dsh_app/phone/a11y/A11yProbe.kt
@@ -53,6 +55,7 @@ while (($#)); do
     --seq) tag=${2:?--seq needs a number}; shift 2 ;;
     --socket) socket=1; shift ;;
     --reuse) reusable=1; shift ;;
+    --token) token_arg=${2:?--token needs a value}; shift 2 ;;
     --stop) stop=1; shift ;;
     -h | --help) usage; exit 0 ;;
     --commands)
@@ -101,6 +104,18 @@ send() {
   esac
 }
 
+# Why a read failed: which of the three links is missing (forward, service, listener).
+diagnose() {
+  echo "a11y-dump: no answer on 127.0.0.1:$port" >&2
+  echo "--- adb forward ---" >&2
+  adbx forward --list >&2
+  echo "--- enabled accessibility services ---" >&2
+  adbx shell settings get secure enabled_accessibility_services >&2
+  echo "--- probe log (last 10) ---" >&2
+  adbx logcat -d -s DshA11yProbe DshA11y 2>/dev/null | tail -10 >&2
+  exit 1
+}
+
 # Broadcasts the token, then waits for the port to answer (the bind happens after delivery).
 listen_with() {
   adbx shell am broadcast -a "$action" --es cmd listen \
@@ -123,8 +138,8 @@ fi
 if ((socket)); then
   adbx forward "tcp:$port" "tcp:$port" >/dev/null
   tf=$(token_file)
-  token=''
-  [[ -f $tf ]] && token=$(cat "$tf")
+  token=${token_arg:-${A11Y_TOKEN:-}}
+  [[ -z $token && -f $tf ]] && token=$(cat "$tf")
   request="dump $budget"
   if [[ -n $reuse_flag ]]; then request="$request $reuse_flag"; else request="$request -"; fi
   request="$request $tag"
@@ -140,7 +155,7 @@ if ((socket)); then
     token=$(new_token)
     listen_with "$token" || die "no listener on 127.0.0.1:$port (accessibility service on?)"
     (umask 077; printf '%s' "$token" >"$tf")
-    body=$(send "$token $request") || die "no answer over 127.0.0.1:$port"
+    body=$(send "$token $request") || diagnose
   fi
 
   if [[ -n $out ]]; then

@@ -237,7 +237,9 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
         val s = ServerSocket()
         return try {
             s.reuseAddress = true
-            s.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), port))
+            // 127.0.0.1 spelled out, not getLoopbackAddress(): the latter follows
+            // java.net.preferIPv6Addresses, and `adb forward` connects over IPv4.
+            s.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), port))
             server = s
             token = t
             acceptThread = Thread({ acceptLoop(s) }, "dsh-a11y-socket").apply {

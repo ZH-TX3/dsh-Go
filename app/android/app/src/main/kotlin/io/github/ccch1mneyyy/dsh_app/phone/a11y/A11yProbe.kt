@@ -22,7 +22,13 @@ import io.github.ccch1mneyyy.dsh_app.phone.ConfirmRequest
 import io.github.ccch1mneyyy.dsh_app.phone.PhoneAction
 import io.github.ccch1mneyyy.dsh_app.phone.PhoneControl
 import java.io.File
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Drives the MAIN driver and the overlay from `adb shell am broadcast`, in every build type
@@ -35,7 +41,8 @@ import java.util.concurrent.Executors
  * WRITE_EXTERNAL_STORAGE is granted with `pm grant <pkg> android.permission.WRITE_EXTERNAL_STORAGE`.
  *
  *   am broadcast -a io.github.ccch1mneyyy.dsh_app.A11Y_PROBE --es cmd screen [--ez image true] [--ez detail true] --ei seq 1
- *   cmd: dump [name] [budget ms] [--ez log true] (the tree as JSON: tree.json, <100 ms typical) |
+ *   cmd: dump [name] [budget ms] [--ez log true] [--ez reuse true] (the tree as JSON: tree.json) |
+ *        listen token [port] / unlisten (a loopback socket for `adb forward`, see [listen]) |
  *        ping | screen | target sid id | tap sid id [long] | type sid id text [submit] | scroll sid [id] dir |
  *        key back|home|recents|notifications | tapxy sid x y | open pkg | collect sid id [pages] [until] |
  *        fg | windows | status [text] | confirm sentence [app] [first] | handoff reason [ms] | injecttest [relax] | guard |
@@ -46,6 +53,19 @@ import java.util.concurrent.Executors
 internal class A11yProbe(private val service: PhoneA11yService, private val driver: MainScreenDriver, private val overlay: ControlOverlay) {
     private val executor = Executors.newSingleThreadExecutor { r -> Thread(r, "dsh-a11y-probe") }
     private val dir = File(service.filesDir, "a11y-probe").apply { mkdirs() }
+
+    /** The last read, kept so a poll over an unchanged screen costs nothing (see [captureJson]). */
+    @Volatile private var lastBytes: ByteArray? = null
+    @Volatile private var lastEvents = -1L
+    @Volatile private var lastAt = 0L
+    @Volatile private var lastNodes = 0
+    @Volatile private var lastWindows = 0
+    @Volatile private var lastPkg: String? = null
+
+    /** Loopback listener for `adb forward`: no `am broadcast` per read, so a read is the read alone. */
+    private var server: ServerSocket? = null
+    private var acceptThread: Thread? = null
+    @Volatile private var token: String? = null
 
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -70,6 +90,7 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
     }
 
     fun unregister() {
+        stopListening()
         runCatching { service.unregisterReceiver(receiver) }
         executor.shutdownNow()
     }
@@ -116,6 +137,8 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
                 ).toString()
                 "windows" -> windows()
                 "dump", "tree" -> dump(seq, a)
+                "listen" -> listen(a)
+                "unlisten" -> { stopListening(); "stopped" }
                 "ping" -> "pong connected=${PhoneA11yService.instance === service} enabled=${PhoneA11yService.isEnabled(service)}"
                 else -> "unknown cmd $cmd"
             }
@@ -134,6 +157,15 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
     private fun result(r: io.github.ccch1mneyyy.dsh_app.phone.ActionResult) =
         "ok=${r.ok} msg=${r.message}\n----\n${r.screen?.let { "id=${it.id}\n${it.text}" }}"
 
+    private class Dumped(
+        val bytes: ByteArray,
+        val nodes: Int,
+        val windows: Int,
+        val truncated: Boolean,
+        val pkg: String?,
+        val reused: Boolean,
+    )
+
     /**
      * The tree as JSON: one [TreeCapture.capture] — the same read the driver does, so an `i` here
      * is a usable `target`/`tap` id — serialized by [TreeJson] and written where adb shell can
@@ -141,9 +173,35 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
      * milliseconds instead of the bridge's seconds.
      */
     private fun dump(seq: Int, a: Args): String {
+        val dumped = captureJson(seq, a.i("budget") ?: 400, a.b("reuse"))
+        val name = (a.s("name") ?: "tree").replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
+        val written = sinks().mapNotNull { sink -> File(sink, "$name.json").takeIf { writeAtomic(it, dumped.bytes) } }
+        if (a.b("log")) String(dumped.bytes, Charsets.UTF_8).chunked(3_000).forEach { Log.i(TAG, it) }
+        return buildString {
+            append("bytes=${dumped.bytes.size} nodes=${dumped.nodes} windows=${dumped.windows} truncated=${dumped.truncated}")
+            append(" pkg=${dumped.pkg ?: "none"}")
+            if (dumped.reused) append(" reused=true")
+            append("\nfiles:\n")
+            if (written.isEmpty()) append("- (none written)\n") else written.forEach { append("- ").append(it.absolutePath).append('\n') }
+            append("----\n")
+            append(String(dumped.bytes, Charsets.UTF_8).take(240))
+        }
+    }
+
+    /**
+     * The capture, serialized. `reuse`: answer from the last read when no accessibility event has
+     * arrived since — a poll over a still screen, which is what makes a read cost nothing at all.
+     * Off by default: no events is not proof that the content is identical. A reused answer keeps
+     * the earlier `seq`.
+     */
+    private fun captureJson(seq: Int, budget: Int, reuse: Boolean): Dumped {
+        val events = service.clock.count
+        val cached = lastBytes
+        if (reuse && cached != null && events == lastEvents && SystemClock.uptimeMillis() - lastAt < REUSE_MS) {
+            return Dumped(cached, lastNodes, lastWindows, false, lastPkg, reused = true)
+        }
         val start = SystemClock.uptimeMillis()
-        val budget = (a.i("budget") ?: 400).toLong()
-        val cap = TreeCapture.capture(service, screenBox(), service.packageName, budget)
+        val cap = TreeCapture.capture(service, screenBox(), service.packageName, budget.toLong())
         val nodes = TreeJson.count(cap)
         val json = try {
             TreeJson.stringify(cap, seq, SystemClock.uptimeMillis() - start)
@@ -151,16 +209,99 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
             cap.recycle()
         }
         val bytes = json.toByteArray(Charsets.UTF_8)
-        val name = (a.s("name") ?: "tree").replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
-        val written = sinks().mapNotNull { d -> File(d, "$name.json").takeIf { writeAtomic(it, bytes) } }
-        if (a.b("log")) json.chunked(3_000).forEach { Log.i(TAG, it) }
-        return buildString {
-            append("bytes=${bytes.size} nodes=$nodes windows=${cap.windows.size} truncated=${cap.truncated}")
-            append(" pkg=${cap.packageName ?: "none"}")
-            append("\nfiles:\n")
-            if (written.isEmpty()) append("- (none written)\n") else written.forEach { append("- ").append(it.absolutePath).append('\n') }
-            append("----\n")
-            append(json.take(240))
+        lastBytes = bytes
+        lastEvents = events
+        lastAt = SystemClock.uptimeMillis()
+        lastNodes = nodes
+        lastWindows = cap.windows.size
+        lastPkg = cap.packageName
+        return Dumped(bytes, nodes, cap.windows.size, cap.truncated, cap.packageName, reused = false)
+    }
+
+    /**
+     * `cmd listen`: a loopback socket that answers reads with no `am broadcast` per read —
+     * `adb forward tcp:<port> tcp:<port>`, then one line per request:
+     *
+     *   <token> dump [budget] [reuse] [seq]   →  OK <bytes>\n<json>
+     *   <token> ping                          →  OK <bytes>\n[...]
+     *
+     * The token arrives with the broadcast, which only a holder of android.permission.DUMP can
+     * send; every app on the phone can open the loopback port, and none of them can answer-guess
+     * it. The socket is bound to 127.0.0.1 and never leaves the device.
+     */
+    private fun listen(a: Args): String {
+        val t = a.s("token")
+        if (t == null || t.length < 8) return "ERR token must be at least 8 characters"
+        val port = a.i("port") ?: PORT
+        stopListening()
+        val s = ServerSocket()
+        return try {
+            s.reuseAddress = true
+            s.bind(InetSocketAddress(InetAddress.getLoopbackAddress(), port))
+            server = s
+            token = t
+            acceptThread = Thread({ acceptLoop(s) }, "dsh-a11y-socket").apply {
+                isDaemon = true
+                start()
+            }
+            "listening on 127.0.0.1:$port"
+        } catch (e: Throwable) {
+            runCatching { s.close() }
+            "ERR ${e.javaClass.simpleName}: ${e.message}"
+        }
+    }
+
+    private fun stopListening() {
+        token = null
+        runCatching { server?.close() }
+        server = null
+        acceptThread?.interrupt()
+        acceptThread = null
+    }
+
+    private fun acceptLoop(s: ServerSocket) {
+        while (!s.isClosed) {
+            val client = try { s.accept() } catch (_: Throwable) { break }
+            try {
+                serve(client)
+            } catch (e: Throwable) {
+                Log.w(TAG, "socket client", e)
+            } finally {
+                runCatching { client.close() }
+            }
+        }
+    }
+
+    /** One connection, as many reads as it wants: a poll loop keeps the socket open. */
+    private fun serve(client: Socket) {
+        client.tcpNoDelay = true
+        val input = client.getInputStream().bufferedReader()
+        val output = client.getOutputStream()
+        while (true) {
+            val line = input.readLine() ?: return
+            val parts = line.trim().split(' ', limit = 2)
+            // A wrong token gets no answer and no explanation: the port is open to every app here.
+            val t = token
+            if (t == null || parts.size < 2 || parts[0] != t) return
+            val args = parts[1].trim().split(' ')
+            val body = try {
+                executor.submit(Callable {
+                    when (args[0]) {
+                        "dump" -> captureJson(
+                            seq = args.getOrNull(3)?.toIntOrNull() ?: 0,
+                            budget = args.getOrNull(1)?.toIntOrNull() ?: 400,
+                            reuse = args.getOrNull(2) == "reuse",
+                        ).bytes
+                        "ping" -> "pong connected=${PhoneA11yService.instance === service} enabled=${PhoneA11yService.isEnabled(service)}".toByteArray()
+                        else -> "ERR unknown cmd ${args[0]}".toByteArray()
+                    }
+                }).get(READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            } catch (e: Throwable) {
+                "ERR ${e.javaClass.simpleName}: ${e.message}".toByteArray()
+            }
+            output.write("OK ${body.size}\n".toByteArray())
+            output.write(body)
+            output.flush()
         }
     }
 
@@ -266,5 +407,12 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
     companion object {
         private const val TAG = "DshA11yProbe"
         const val ACTION = "io.github.ccch1mneyyy.dsh_app.A11Y_PROBE"
+
+        /** Loopback port `cmd listen` binds (`adb forward tcp:PORT tcp:PORT`). */
+        const val PORT = 47913
+
+        /** A reused read answers within this window; after it, the tree is read again. */
+        private const val REUSE_MS = 2_000L
+        private const val READ_TIMEOUT_MS = 15_000L
     }
 }

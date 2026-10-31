@@ -98,13 +98,15 @@ jobs:
             *"name='io.github.ccch1mneyyy.dsh_app.a11y'"*) ;;
             *) echo "::error::unexpected package: $badge"; exit 1 ;;
           esac
-          # ...and the components must still resolve to the namespace's classes, not
-          # <applicationId>.MainActivity: the manifest names them relative (".MainActivity").
-          launch=$("$aapt2" dump badging "$apk" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p")
-          echo "launchable=$launch"
-          case "$launch" in
-            io.github.ccch1mneyyy.dsh_app.*) ;;
-            *) echo "::error::launchable activity '$launch' is outside the namespace"; exit 1 ;;
+          # ...and the components must still resolve into the namespace, not into
+          # <applicationId>: the manifest names them relative (".MainActivity") and the launcher
+          # entries are activity-aliases, so nothing here comes from `badging`.
+          manifest=$("$aapt2" dump xmltree "$apk" --file AndroidManifest.xml)
+          names=$(echo "$manifest" | grep -oE 'name\(0x01010003\)="[^"]*"' | sort -u)
+          echo "$names" | grep -E 'MainActivity|Launcher' || true
+          case "$names" in
+            *'"io.github.ccch1mneyyy.dsh_app.a11y.'*)
+              echo "::error::a component resolved into the applicationId package; it would not exist at runtime"; exit 1 ;;
           esac
           echo "apk=$apk ($(du -h "$apk" | cut -f1))"
           echo "sha256=$(sha256sum "$apk" | cut -d' ' -f1)" | tee -a "$GITHUB_STEP_SUMMARY"

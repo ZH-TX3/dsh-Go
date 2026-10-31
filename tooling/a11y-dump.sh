@@ -93,7 +93,8 @@ send() {
   local status n
   exec 3<>"/dev/tcp/127.0.0.1/$port" 2>/dev/null || return 1
   if ! printf '%s\n' "$1" >&3 2>/dev/null; then exec 3>&-; return 1; fi
-  if ! IFS= read -r status <&3; then exec 3>&-; return 1; fi
+  # -t: a listener wedged on some other client's socket must not hang this script.
+  if ! IFS= read -r -t 5 status <&3; then exec 3>&-; return 1; fi
   case $status in
     "OK "*)
       n=${status#OK }

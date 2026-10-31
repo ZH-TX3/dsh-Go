@@ -264,12 +264,20 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
     private fun acceptLoop(s: ServerSocket) {
         while (!s.isClosed) {
             val client = try { s.accept() } catch (_: Throwable) { break }
-            try {
-                serve(client)
-            } catch (e: Throwable) {
-                Log.w(TAG, "socket client", e)
-            } finally {
-                runCatching { client.close() }
+            // A thread per client: one that vanishes mid-line must not pin the port. It did once —
+            // the client hung, `readLine` never returned, and no later read could be served.
+            // Captures are still serialized, in the executor.
+            Thread({
+                try {
+                    serve(client)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "socket client", e)
+                } finally {
+                    runCatching { client.close() }
+                }
+            }, "dsh-a11y-socket-client").apply {
+                isDaemon = true
+                start()
             }
         }
     }
@@ -277,6 +285,7 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
     /** One connection, as many reads as it wants: a poll loop keeps the socket open. */
     private fun serve(client: Socket) {
         client.tcpNoDelay = true
+        client.soTimeout = CLIENT_IDLE_MS
         val input = client.getInputStream().bufferedReader()
         val output = client.getOutputStream()
         while (true) {
@@ -416,5 +425,8 @@ internal class A11yProbe(private val service: PhoneA11yService, private val driv
         /** A reused read answers within this window; after it, the tree is read again. */
         private const val REUSE_MS = 2_000L
         private const val READ_TIMEOUT_MS = 15_000L
+
+        /** An idle client connection is closed after this, so a dead poller frees its thread. */
+        private const val CLIENT_IDLE_MS = 60_000
     }
 }

@@ -81,6 +81,15 @@ jobs:
             --build-number "$code" \
             --dart-define=DSH_APP_VERSION="$name+$code"
 
+      - name: unit tests (a11y, launcher icons)
+        if: matrix.flavor == 'x64' && matrix.mode == 'debug'
+        working-directory: app/android
+        run: >
+          ./gradlew :app:testX64DebugUnitTest
+          --tests 'io.github.ccch1mneyyy.dsh_app.phone.a11y.*'
+          --tests 'io.github.ccch1mneyyy.dsh_app.icons.*'
+          --tests 'io.github.ccch1mneyyy.dsh_app.launch.LaunchThemesTest'
+
       - name: inspect
         working-directory: app
         env:
@@ -98,27 +107,21 @@ jobs:
             *"name='io.github.ccch1mneyyy.dsh_app.a11y'"*) ;;
             *) echo "::error::unexpected package: $badge"; exit 1 ;;
           esac
-          # ...and the components must still resolve into the namespace, not into
-          # <applicationId>: the manifest names them relative (".MainActivity") and the launcher
-          # entries are activity-aliases, so nothing here comes from `badging`.
+          # ...and the components must still resolve into the namespace, not into <applicationId>:
+          # the manifest names them relative (".MainActivity") and the launcher entries are
+          # activity-aliases, so none of this comes from `badging`. Positive check only — some
+          # library's meta-data legitimately carries ${applicationId} somewhere.
           manifest=$("$aapt2" dump xmltree "$apk" --file AndroidManifest.xml)
           names=$(echo "$manifest" | grep -oE 'name\(0x01010003\)="[^"]*"' | sort -u)
-          echo "$names" | grep -E 'MainActivity|Launcher' || true
-          case "$names" in
-            *'"io.github.ccch1mneyyy.dsh_app.a11y.'*)
-              echo "::error::a component resolved into the applicationId package; it would not exist at runtime"; exit 1 ;;
-          esac
+          echo "$names"
+          for want in MainActivity LauncherMist LauncherMistAlt LauncherNight LauncherFrost LauncherInk; do
+            case "$names" in
+              *"\"io.github.ccch1mneyyy.dsh_app.$want\""*) ;;
+              *) echo "::error::$want did not resolve into the namespace"; exit 1 ;;
+            esac
+          done
           echo "apk=$apk ($(du -h "$apk" | cut -f1))"
           echo "sha256=$(sha256sum "$apk" | cut -d' ' -f1)" | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: unit tests (a11y, launcher icons)
-        if: matrix.flavor == 'x64' && matrix.mode == 'debug'
-        working-directory: app/android
-        run: >
-          ./gradlew :app:testX64DebugUnitTest
-          --tests 'io.github.ccch1mneyyy.dsh_app.phone.a11y.*'
-          --tests 'io.github.ccch1mneyyy.dsh_app.icons.*'
-          --tests 'io.github.ccch1mneyyy.dsh_app.launch.LaunchThemesTest'
 
       - uses: actions/upload-artifact@v4
         with:

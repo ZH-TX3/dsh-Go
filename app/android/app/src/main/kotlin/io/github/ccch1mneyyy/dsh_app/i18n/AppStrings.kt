@@ -18,8 +18,10 @@ import java.util.Locale
  */
 object AppStrings {
     /** The app's name as the phone shows it (`android:label` in AndroidManifest.xml), in every
-     *  language: notification titles and their fallbacks. */
-    const val APP_NAME = "DSH Go"
+     *  language: notification titles and their fallbacks. The "A11y" mark is this fork's: it
+     *  installs beside an official DSH Go (app/build.gradle.kts, applicationIdSuffix), and the
+     *  two have to be told apart in the launcher and in 设置 → 无障碍. */
+    const val APP_NAME = "DSH Go A11y"
 
     private const val PREFS = "FlutterSharedPreferences"
     private const val KEY = "flutter.app_language"

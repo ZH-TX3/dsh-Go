@@ -56,9 +56,11 @@ class LauncherManifestTest {
         assertTrue(mainActivity.children("meta-data").any { it.getAttribute("android:name") == "flutter_deeplinking_enabled" })
     }
 
-    @Test fun thePhoneShowsTheAppAsDshGo() {
+    // The "A11y" mark is this fork's (applicationIdSuffix .a11y, so it installs beside an
+    // official DSH Go); everything else about the label is unchanged.
+    @Test fun thePhoneShowsTheAppAsDshGoA11y() {
         val app = manifest().children("application").single()
-        assertEquals("DSH Go", app.getAttribute("android:label"))
+        assertEquals("DSH Go A11y", app.getAttribute("android:label"))
         // Notification titles say the same name.
         assertEquals(app.getAttribute("android:label"), AppStrings.APP_NAME)
         // Launcher entries, Recents and the share sheet all take the application's label.
